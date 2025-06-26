@@ -1,0 +1,30 @@
+# 依赖
+node_modules/
+package-lock.json
+
+# 环境变量 - 重要！不要上传API密钥
+.env
+.env.local
+.env.*.local
+
+# 日志
+logs/
+*.log
+
+# 数据库
+*.db
+*.sqlite
+*.db-journal
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# 构建输出
+dist/
+build/
