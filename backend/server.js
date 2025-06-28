@@ -1,22 +1,51 @@
 // ===== 文件位置: backend/server.js =====
-// 增强版服务器，支持频道搜索和真实数据读取
+// 支持代理的增强版服务器
 
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
-const { google } = require('googleapis');
+const axios = require('axios');
+const { HttpsProxyAgent } = require('https-proxy-agent');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// YouTube API 配置
-const youtube = google.youtube({
-  version: 'v3',
-  auth: process.env.YOUTUBE_API_KEY || 'AIzaSyBa4HftrclnGNjRRCUCCEnnI4hF3hZdUWo'
-});
+// API配置
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || 'AIzaSyBa4HftrclnGNjRRCUCCEnnI4hF3hZdUWo';
+const YOUTUBE_API_BASE = 'https://www.googleapis.com/youtube/v3';
+
+// 代理配置 - 根据你的VPN设置
+const PROXY_URL = process.env.PROXY_URL || 'http://127.0.0.1:7890'; // 使用你的mixed-port
+const USE_PROXY = process.env.USE_PROXY === 'true' || true; // 默认启用代理
+
+// 创建axios实例（带代理）
+let youtubeApi;
+if (USE_PROXY) {
+  console.log(`🌐 使用代理: ${PROXY_URL}`);
+  const proxyAgent = new HttpsProxyAgent(PROXY_URL);
+  
+  youtubeApi = axios.create({
+    baseURL: YOUTUBE_API_BASE,
+    timeout: 30000,
+    params: {
+      key: YOUTUBE_API_KEY
+    },
+    httpsAgent: proxyAgent,
+    proxy: false // 重要：禁用axios的默认代理设置
+  });
+} else {
+  console.log('📡 直接连接（不使用代理）');
+  youtubeApi = axios.create({
+    baseURL: YOUTUBE_API_BASE,
+    timeout: 30000,
+    params: {
+      key: YOUTUBE_API_KEY
+    }
+  });
+}
 
 // 中间件
 app.use(cors());
@@ -49,6 +78,12 @@ const quotaManager = {
 // 数据库连接
 async function getDb() {
   const dbPath = path.join(__dirname, 'database', 'youtube_ranking.db');
+  const fs = require('fs');
+  const dbDir = path.dirname(dbPath);
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
+  
   return open({
     filename: dbPath,
     driver: sqlite3.Database
@@ -57,88 +92,119 @@ async function getDb() {
 
 // 初始化数据库
 async function initDatabase() {
-  const db = await getDb();
-  
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS channels (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      description TEXT,
-      subscriber_count INTEGER,
-      video_count INTEGER,
-      is_active BOOLEAN DEFAULT 1,
-      added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_updated DATETIME
-    );
+  try {
+    const db = await getDb();
+    
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS channels (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        subscriber_count INTEGER,
+        video_count INTEGER,
+        is_active BOOLEAN DEFAULT 1,
+        added_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_updated DATETIME
+      );
 
-    CREATE TABLE IF NOT EXISTS videos (
-      id TEXT PRIMARY KEY,
-      channel_id TEXT NOT NULL,
-      title TEXT NOT NULL,
-      description TEXT,
-      duration INTEGER,
-      is_short BOOLEAN,
-      published_at DATETIME,
-      thumbnail_url TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (channel_id) REFERENCES channels(id)
-    );
+      CREATE TABLE IF NOT EXISTS videos (
+        id TEXT PRIMARY KEY,
+        channel_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT,
+        duration INTEGER,
+        is_short BOOLEAN,
+        published_at DATETIME,
+        thumbnail_url TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (channel_id) REFERENCES channels(id)
+      );
 
-    CREATE TABLE IF NOT EXISTS video_stats (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      video_id TEXT NOT NULL,
-      view_count INTEGER,
-      like_count INTEGER,
-      comment_count INTEGER,
-      captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (video_id) REFERENCES videos(id)
-    );
+      CREATE TABLE IF NOT EXISTS video_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        video_id TEXT NOT NULL,
+        view_count INTEGER,
+        like_count INTEGER,
+        comment_count INTEGER,
+        captured_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (video_id) REFERENCES videos(id)
+      );
 
-    CREATE TABLE IF NOT EXISTS daily_rankings (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      video_id TEXT NOT NULL,
-      rank_type TEXT NOT NULL,
-      rank_position INTEGER,
-      heat_score DECIMAL(10,2),
-      view_increment INTEGER,
-      ranking_date DATE,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (video_id) REFERENCES videos(id)
-    );
-  `);
-  
-  // 插入默认AI频道
-  const defaultChannels = [
-    { id: 'UCbfYPyITQ-7l4upoX8nvctg', name: 'Two Minute Papers' },
-    { id: 'UCq6VFHwMzcMXbuKyG7SQYIg', name: 'Matt Wolfe' },
-    { id: 'UCMLtBahI5DMrt0NPvDSoIRQ', name: 'Yannic Kilcher' },
-    { id: 'UC8butISFwT-Wl7EV0hUK0BQ', name: 'freeCodeCamp.org' },
-    { id: 'UCfzlCWGWYyIQ0aLC5w48gBQ', name: 'Sentdex' },
-    { id: 'UCgBfm4GdqLzWJXP2bIQ5y8Q', name: 'AI Explained' },
-    { id: 'UCtYLUTtgS3k1Fg4y5tAhLbw', name: 'Fireship' },
-    { id: 'UCYO_jab_esuFRV4b17AJtAw', name: '3Blue1Brown' }
-  ];
-  
-  for (const channel of defaultChannels) {
-    await db.run(
-      'INSERT OR IGNORE INTO channels (id, name) VALUES (?, ?)',
-      [channel.id, channel.name]
-    );
+      CREATE TABLE IF NOT EXISTS daily_rankings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        video_id TEXT NOT NULL,
+        rank_type TEXT NOT NULL,
+        rank_position INTEGER,
+        heat_score DECIMAL(10,2),
+        view_increment INTEGER,
+        ranking_date DATE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (video_id) REFERENCES videos(id)
+      );
+    `);
+    
+    // 插入默认AI频道
+    const defaultChannels = [
+      { id: 'UCbfYPyITQ-7l4upoX8nvctg', name: 'Two Minute Papers' },
+      { id: 'UCq6VFHwMzcMXbuKyG7SQYIg', name: 'Matt Wolfe' },
+      { id: 'UCMLtBahI5DMrt0NPvDSoIRQ', name: 'Yannic Kilcher' },
+      { id: 'UC8butISFwT-Wl7EV0hUK0BQ', name: 'freeCodeCamp.org' },
+      { id: 'UCfzlCWGWYyIQ0aLC5w48gBQ', name: 'Sentdex' }
+    ];
+    
+    for (const channel of defaultChannels) {
+      await db.run(
+        'INSERT OR IGNORE INTO channels (id, name) VALUES (?, ?)',
+        [channel.id, channel.name]
+      );
+    }
+    
+    await db.close();
+    console.log('✅ 数据库初始化完成');
+  } catch (error) {
+    console.error('❌ 数据库初始化失败:', error);
   }
-  
-  await db.close();
-  console.log('✅ 数据库初始化完成');
 }
 
-// API路由
+// ===== API路由 =====
 
-// 测试API
-app.get('/api/test', (req, res) => {
+// 健康检查
+app.get('/api/health', (req, res) => {
   res.json({ 
-    success: true, 
-    message: 'API正常工作！',
-    timestamp: new Date().toISOString()
+    status: 'OK',
+    apiKey: YOUTUBE_API_KEY ? '已配置' : '未配置',
+    proxy: USE_PROXY ? `已启用 (${PROXY_URL})` : '未启用',
+    quotaRemaining: quotaManager.getRemaining()
   });
+});
+
+// 测试YouTube API连接（带代理）
+app.get('/api/test-youtube', async (req, res) => {
+  try {
+    console.log('测试YouTube API连接...');
+    
+    const response = await youtubeApi.get('/videos', {
+      params: {
+        part: 'snippet',
+        id: 'dQw4w9WgXcQ'
+      }
+    });
+    
+    res.json({
+      success: true,
+      message: 'YouTube API连接正常',
+      proxy: USE_PROXY ? `通过代理 ${PROXY_URL}` : '直接连接',
+      data: response.data
+    });
+  } catch (error) {
+    console.error('YouTube API测试失败:', error.message);
+    res.json({
+      success: false,
+      error: error.message,
+      proxy: USE_PROXY ? `代理: ${PROXY_URL}` : '未使用代理',
+      suggestion: USE_PROXY ? '检查代理设置' : '尝试启用代理'
+    });
+  }
 });
 
 // 获取统计信息
@@ -172,7 +238,7 @@ app.get('/api/stats', async (req, res) => {
     res.json({
       success: true,
       stats: {
-        active_channels: 8,
+        active_channels: 0,
         total_videos: 0,
         total_shorts: 0,
         total_long_videos: 0,
@@ -184,10 +250,10 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
-// 搜索AI频道 - 新增功能
+// 搜索AI频道
 app.get('/api/search/channels', async (req, res) => {
   try {
-    const { q = 'AI artificial intelligence machine learning', pageToken } = req.query;
+    const { q = 'AI machine learning', pageToken } = req.query;
     
     if (!quotaManager.hasQuota(100)) {
       return res.status(429).json({ 
@@ -199,35 +265,36 @@ app.get('/api/search/channels', async (req, res) => {
     
     console.log('搜索AI频道，关键词:', q);
     
-    // 搜索频道
-    const searchResponse = await youtube.search.list({
-      part: 'snippet',
-      q: q,
-      type: 'channel',
-      maxResults: 10,
-      regionCode: 'US',
-      relevanceLanguage: 'en',
-      pageToken: pageToken
+    const response = await youtubeApi.get('/search', {
+      params: {
+        part: 'snippet',
+        q: q,
+        type: 'channel',
+        maxResults: 10,
+        regionCode: 'US',
+        relevanceLanguage: 'en',
+        pageToken: pageToken
+      }
     });
     
     quotaManager.recordUsage(100);
     
     const channels = [];
     const db = await getDb();
-    
-    // 获取已添加的频道ID列表
     const existingChannels = await db.all('SELECT id FROM channels');
     const existingIds = new Set(existingChannels.map(ch => ch.id));
+    await db.close();
     
     // 处理搜索结果
-    for (const item of searchResponse.data.items) {
+    for (const item of response.data.items) {
       const channelId = item.snippet.channelId;
       const channelTitle = item.snippet.channelTitle;
       const description = item.snippet.description;
       
-      // 简单的AI相关性检查
+      // AI相关性检查
       const aiKeywords = ['AI', 'artificial intelligence', 'machine learning', 'deep learning', 
-                         'neural', 'GPT', 'data science', 'computer vision', 'NLP'];
+                         'neural', 'GPT', 'data science', 'computer vision', 'NLP', 'ChatGPT', 
+                         'LLM', 'transformer', 'tensorflow', 'pytorch'];
       const isAIRelated = aiKeywords.some(keyword => 
         (channelTitle + ' ' + description).toLowerCase().includes(keyword.toLowerCase())
       );
@@ -242,13 +309,11 @@ app.get('/api/search/channels', async (req, res) => {
       });
     }
     
-    await db.close();
-    
     res.json({
       success: true,
       channels: channels,
-      nextPageToken: searchResponse.data.nextPageToken,
-      totalResults: searchResponse.data.pageInfo.totalResults,
+      nextPageToken: response.data.nextPageToken,
+      totalResults: response.data.pageInfo?.totalResults,
       quotaUsed: 100,
       quotaRemaining: quotaManager.getRemaining()
     });
@@ -257,12 +322,13 @@ app.get('/api/search/channels', async (req, res) => {
     console.error('搜索频道失败:', error);
     res.status(500).json({ 
       success: false, 
-      error: '搜索失败: ' + error.message 
+      error: '搜索失败: ' + error.message,
+      proxy: USE_PROXY ? `使用代理: ${PROXY_URL}` : '未使用代理'
     });
   }
 });
 
-// 添加频道到监控列表 - 新增功能
+// 添加频道
 app.post('/api/channels/add', async (req, res) => {
   try {
     const { channelId, channelName } = req.body;
@@ -276,7 +342,6 @@ app.post('/api/channels/add', async (req, res) => {
     
     const db = await getDb();
     
-    // 检查是否已存在
     const existing = await db.get('SELECT id FROM channels WHERE id = ?', channelId);
     if (existing) {
       await db.close();
@@ -286,7 +351,6 @@ app.post('/api/channels/add', async (req, res) => {
       });
     }
     
-    // 添加频道
     await db.run(
       'INSERT INTO channels (id, name, is_active) VALUES (?, ?, 1)',
       [channelId, channelName]
@@ -311,7 +375,7 @@ app.post('/api/channels/add', async (req, res) => {
   }
 });
 
-// 获取已添加的频道列表
+// 获取频道列表
 app.get('/api/channels', async (req, res) => {
   try {
     const db = await getDb();
@@ -331,7 +395,7 @@ app.get('/api/channels', async (req, res) => {
   }
 });
 
-// 从频道获取视频并生成榜单 - 新增功能
+// 获取视频数据
 app.post('/api/fetch/videos', async (req, res) => {
   try {
     console.log('开始获取视频数据...');
@@ -345,31 +409,39 @@ app.post('/api/fetch/videos', async (req, res) => {
     }
     
     const db = await getDb();
-    const channels = await db.all('SELECT * FROM channels WHERE is_active = 1');
+    const channels = await db.all('SELECT * FROM channels WHERE is_active = 1 LIMIT 5');
     
     let totalVideos = 0;
+    let errors = [];
     
     for (const channel of channels) {
       try {
         console.log(`获取频道视频: ${channel.name}`);
         
-        // 获取频道的上传播放列表
-        const channelResponse = await youtube.channels.list({
-          part: 'contentDetails',
-          id: channel.id
+        // 获取频道信息
+        const channelResponse = await youtubeApi.get('/channels', {
+          params: {
+            part: 'contentDetails',
+            id: channel.id
+          }
         });
         
         quotaManager.recordUsage(1);
         
-        if (!channelResponse.data.items.length) continue;
+        if (!channelResponse.data.items || channelResponse.data.items.length === 0) {
+          console.log(`频道 ${channel.name} 未找到`);
+          continue;
+        }
         
         const uploadsPlaylistId = channelResponse.data.items[0].contentDetails.relatedPlaylists.uploads;
         
         // 获取最近的视频
-        const videosResponse = await youtube.playlistItems.list({
-          part: 'contentDetails',
-          playlistId: uploadsPlaylistId,
-          maxResults: 10 // 每个频道获取10个最新视频
+        const videosResponse = await youtubeApi.get('/playlistItems', {
+          params: {
+            part: 'contentDetails',
+            playlistId: uploadsPlaylistId,
+            maxResults: 5
+          }
         });
         
         quotaManager.recordUsage(1);
@@ -377,10 +449,12 @@ app.post('/api/fetch/videos', async (req, res) => {
         const videoIds = videosResponse.data.items.map(item => item.contentDetails.videoId);
         
         if (videoIds.length > 0) {
-          // 批量获取视频详情
-          const videoDetailsResponse = await youtube.videos.list({
-            part: 'snippet,statistics,contentDetails',
-            id: videoIds.join(',')
+          // 获取视频详情
+          const videoDetailsResponse = await youtubeApi.get('/videos', {
+            params: {
+              part: 'snippet,statistics,contentDetails',
+              id: videoIds.join(',')
+            }
           });
           
           quotaManager.recordUsage(1);
@@ -390,7 +464,6 @@ app.post('/api/fetch/videos', async (req, res) => {
             const duration = parseDuration(video.contentDetails.duration);
             const isShort = duration <= 60;
             
-            // 保存视频
             await db.run(`
               INSERT OR REPLACE INTO videos (
                 id, channel_id, title, description, duration, is_short, 
@@ -400,14 +473,13 @@ app.post('/api/fetch/videos', async (req, res) => {
               video.id,
               channel.id,
               video.snippet.title,
-              video.snippet.description,
+              video.snippet.description || '',
               duration,
               isShort ? 1 : 0,
               video.snippet.publishedAt,
               video.snippet.thumbnails.high?.url || video.snippet.thumbnails.default?.url
             ]);
             
-            // 保存统计数据
             await db.run(`
               INSERT INTO video_stats (
                 video_id, view_count, like_count, comment_count
@@ -423,8 +495,12 @@ app.post('/api/fetch/videos', async (req, res) => {
           }
         }
         
+        // 添加延迟
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
       } catch (error) {
         console.error(`获取频道 ${channel.name} 视频失败:`, error.message);
+        errors.push(`${channel.name}: ${error.message}`);
       }
     }
     
@@ -438,6 +514,7 @@ app.post('/api/fetch/videos', async (req, res) => {
     res.json({
       success: true,
       message: `成功获取 ${totalVideos} 个视频`,
+      errors: errors.length > 0 ? errors : undefined,
       quotaUsed: quotaManager.used,
       quotaRemaining: quotaManager.getRemaining()
     });
@@ -451,73 +528,7 @@ app.post('/api/fetch/videos', async (req, res) => {
   }
 });
 
-// 生成榜单
-async function generateRankings(db) {
-  console.log('生成榜单...');
-  
-  const today = new Date().toISOString().split('T')[0];
-  
-  // 清除今日旧榜单
-  await db.run('DELETE FROM daily_rankings WHERE ranking_date = ?', today);
-  
-  // 获取所有视频的最新统计
-  const videos = await db.all(`
-    SELECT 
-      v.*,
-      vs.view_count,
-      vs.like_count,
-      vs.comment_count,
-      vs.view_count as heat_score
-    FROM videos v
-    JOIN video_stats vs ON v.id = vs.video_id
-    WHERE vs.id IN (
-      SELECT MAX(id) FROM video_stats GROUP BY video_id
-    )
-    ORDER BY vs.view_count DESC
-  `);
-  
-  // 分别处理Shorts和长视频
-  const shorts = videos.filter(v => v.is_short);
-  const longVideos = videos.filter(v => !v.is_short);
-  
-  // 保存Shorts榜单
-  for (let i = 0; i < Math.min(50, shorts.length); i++) {
-    await db.run(`
-      INSERT INTO daily_rankings (
-        video_id, rank_type, rank_position, heat_score, 
-        view_increment, ranking_date
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `, [
-      shorts[i].id,
-      'shorts',
-      i + 1,
-      shorts[i].heat_score,
-      Math.floor(shorts[i].view_count * 0.1), // 模拟增量
-      today
-    ]);
-  }
-  
-  // 保存长视频榜单
-  for (let i = 0; i < Math.min(50, longVideos.length); i++) {
-    await db.run(`
-      INSERT INTO daily_rankings (
-        video_id, rank_type, rank_position, heat_score, 
-        view_increment, ranking_date
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `, [
-      longVideos[i].id,
-      'long',
-      i + 1,
-      longVideos[i].heat_score,
-      Math.floor(longVideos[i].view_count * 0.1), // 模拟增量
-      today
-    ]);
-  }
-  
-  console.log(`✅ 榜单生成完成: Shorts ${shorts.length} 个, 长视频 ${longVideos.length} 个`);
-}
-
-// 获取榜单数据
+// 获取榜单
 app.get('/api/rankings/:type', async (req, res) => {
   try {
     const { type } = req.params;
@@ -540,18 +551,17 @@ app.get('/api/rankings/:type', async (req, res) => {
         v.published_at,
         c.name as channel_name,
         c.id as channel_id,
-        vs.view_count,
-        vs.like_count,
-        vs.comment_count
+        COALESCE(vs.view_count, 0) as view_count,
+        COALESCE(vs.like_count, 0) as like_count,
+        COALESCE(vs.comment_count, 0) as comment_count
       FROM daily_rankings dr
       JOIN videos v ON dr.video_id = v.id
       JOIN channels c ON v.channel_id = c.id
-      JOIN (
-        SELECT video_id, MAX(id) as latest_id
+      LEFT JOIN (
+        SELECT video_id, view_count, like_count, comment_count
         FROM video_stats
-        GROUP BY video_id
-      ) latest ON latest.video_id = v.id
-      JOIN video_stats vs ON vs.id = latest.latest_id
+        WHERE id IN (SELECT MAX(id) FROM video_stats GROUP BY video_id)
+      ) vs ON vs.video_id = v.id
       WHERE dr.ranking_date = ?
     `;
     
@@ -559,7 +569,7 @@ app.get('/api/rankings/:type', async (req, res) => {
       sql += ` AND dr.rank_type = ?`;
     }
     
-    sql += ` ORDER BY dr.rank_position`;
+    sql += ` ORDER BY dr.rank_position LIMIT 50`;
     
     const params = type === 'all' ? [queryDate] : [queryDate, type];
     const rankings = await db.all(sql, params);
@@ -583,7 +593,70 @@ app.get('/api/rankings/:type', async (req, res) => {
   }
 });
 
-// 解析YouTube时长格式
+// 生成榜单
+async function generateRankings(db) {
+  console.log('生成榜单...');
+  
+  const today = new Date().toISOString().split('T')[0];
+  
+  await db.run('DELETE FROM daily_rankings WHERE ranking_date = ?', today);
+  
+  const videos = await db.all(`
+    SELECT 
+      v.*,
+      vs.view_count,
+      vs.like_count,
+      vs.comment_count,
+      vs.view_count as heat_score
+    FROM videos v
+    LEFT JOIN video_stats vs ON v.id = vs.video_id
+    WHERE vs.id IN (
+      SELECT MAX(id) FROM video_stats GROUP BY video_id
+    )
+    ORDER BY vs.view_count DESC
+  `);
+  
+  const shorts = videos.filter(v => v.is_short);
+  const longVideos = videos.filter(v => !v.is_short);
+  
+  // 保存Shorts榜单
+  for (let i = 0; i < Math.min(50, shorts.length); i++) {
+    await db.run(`
+      INSERT INTO daily_rankings (
+        video_id, rank_type, rank_position, heat_score, 
+        view_increment, ranking_date
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `, [
+      shorts[i].id,
+      'shorts',
+      i + 1,
+      shorts[i].heat_score,
+      Math.floor(shorts[i].view_count * 0.1),
+      today
+    ]);
+  }
+  
+  // 保存长视频榜单
+  for (let i = 0; i < Math.min(50, longVideos.length); i++) {
+    await db.run(`
+      INSERT INTO daily_rankings (
+        video_id, rank_type, rank_position, heat_score, 
+        view_increment, ranking_date
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `, [
+      longVideos[i].id,
+      'long',
+      i + 1,
+      longVideos[i].heat_score,
+      Math.floor(longVideos[i].view_count * 0.1),
+      today
+    ]);
+  }
+  
+  console.log(`✅ 榜单生成完成: Shorts ${shorts.length} 个, 长视频 ${longVideos.length} 个`);
+}
+
+// 解析YouTube时长
 function parseDuration(duration) {
   const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
   if (!match) return 0;
@@ -601,10 +674,10 @@ initDatabase().then(() => {
     console.log(`\n🚀 服务器启动成功！`);
     console.log(`📡 API地址: http://localhost:${PORT}`);
     console.log(`🌐 网页地址: http://localhost:${PORT}`);
-    console.log(`\n📌 新增功能:`);
-    console.log(`  - 搜索AI频道: /api/search/channels`);
-    console.log(`  - 添加频道: /api/channels/add`);
-    console.log(`  - 获取视频: /api/fetch/videos`);
-    console.log(`\n💡 提示: 点击网页上的"搜索AI频道"按钮开始使用`);
+    console.log(`🔌 代理状态: ${USE_PROXY ? `已启用 (${PROXY_URL})` : '未启用'}`);
+    console.log(`\n💡 使用提示:`);
+    console.log(`  1. 访问 /api/test-youtube 测试YouTube连接`);
+    console.log(`  2. 访问 /api/health 查看系统状态`);
+    console.log(`  3. 如果连接失败，检查代理是否正常运行`);
   });
 }).catch(console.error);

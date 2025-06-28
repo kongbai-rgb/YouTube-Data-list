@@ -1,30 +1,60 @@
 # 依赖
 node_modules/
 package-lock.json
+yarn.lock
+pnpm-lock.yaml
 
-# 环境变量 - 重要！不要上传API密钥
+# 环境变量 - 重要！
 .env
 .env.local
 .env.*.local
+*.env
 
 # 日志
 logs/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # 数据库
 *.db
 *.sqlite
 *.db-journal
+*.db-shm
+*.db-wal
 
 # 系统文件
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # IDE
 .vscode/
 .idea/
 *.sublime-*
+*.swp
+*.swo
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+*.bak
+*.cache
 
 # 构建输出
 dist/
 build/
+out/
+
+# 测试覆盖率
+coverage/
+.nyc_output/
+
+# 调试
+.vscode/launch.json
+`;
+
+fs.writeFileSync(path.join(__dirname, '.gitignore'), gitignoreContent.trim());
+console.log('\n✅ 已更新 .gitignore');

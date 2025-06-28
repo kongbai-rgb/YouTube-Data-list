@@ -1,41 +1,54 @@
-@echo off
+const startScriptWindows = `@echo off
 echo ========================================
-echo   YouTube AI频道热度榜 启动脚本
+echo   YouTube AI榜单 - 快速启动
 echo ========================================
 echo.
 
 cd backend
 
-echo 检查Node.js版本...
-node -v
-if %errorlevel% neq 0 (
-    echo 错误: 未安装Node.js，请先安装Node.js
-    pause
-    exit /b 1
-)
-
-echo.
-echo 检查依赖安装...
+REM 检查依赖
 if not exist "node_modules" (
-    echo 安装依赖中...
-    npm install
-)
-
-echo.
-echo 检查环境变量配置...
-if not exist ".env" (
-    echo 错误: 未找到.env文件
-    echo 请复制.env.example为.env并配置YouTube API密钥
-    pause
-    exit /b 1
+    echo 安装依赖...
+    call npm install
 )
 
 echo.
 echo 启动服务器...
-echo 访问地址: http://localhost:3000
-echo 按 Ctrl+C 停止服务器
+echo 浏览器访问: http://localhost:3000
 echo.
 
-npm run dev
-
+node server.js
 pause
+`;
+
+const startScriptUnix = `#!/bin/bash
+echo "========================================"
+echo "  YouTube AI榜单 - 快速启动"
+echo "========================================"
+echo ""
+
+cd backend
+
+# 检查依赖
+if [ ! -d "node_modules" ]; then
+    echo "安装依赖..."
+    npm install
+fi
+
+echo ""
+echo "启动服务器..."
+echo "浏览器访问: http://localhost:3000"
+echo ""
+
+node server.js
+`;
+
+// 根据操作系统创建启动脚本
+if (process.platform === 'win32') {
+  fs.writeFileSync(path.join(__dirname, 'start.bat'), startScriptWindows);
+  console.log('\n✅ 已创建 start.bat');
+} else {
+  fs.writeFileSync(path.join(__dirname, 'start.sh'), startScriptUnix);
+  fs.chmodSync(path.join(__dirname, 'start.sh'), '755');
+  console.log('\n✅ 已创建 start.sh');
+}
